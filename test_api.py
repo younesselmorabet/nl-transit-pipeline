@@ -1,65 +1,88 @@
 # ── Import the tools we need ──────────────────────────────
-import os                        # read environment variables (API key) and manage folders/paths
-import json                      # convert Python data <-> JSON text, and write it to files
-import requests                  # send/receive data over the internet (call APIs)
-from datetime import datetime    # get the current date/time, to timestamp our saved files
+import os                        # environment variables, folder creation
+import json                      # convert Python data <-> JSON, write to files
+import requests                  # call the NS API over the internet
+import schedule                  # lets us say "run this every N minutes" simply
+import time                      # lets us pause the program between checks
+from datetime import datetime    # get current date/time, for timestamps
 from dotenv import load_dotenv   # read our .env file
 
 # ── Load your secret key ──────────────────────────────────
-load_dotenv()                     # loads .env contents into the environment
-api_key = os.getenv("NS_API_KEY") # grabs NS_API_KEY specifically from it
-# Why: keeps the actual key out of the code itself — safe to push this file to GitHub.
+load_dotenv()
+api_key = os.getenv("NS_API_KEY")
+# Why: keeps the key out of the code itself, safe to push to GitHub.
 
-# ── Set up what we're asking for ──────────────────────────
-url = "https://gateway.apiportal.ns.nl/reisinformatie-api/api/v2/departures"
-# ^ the exact address of NS's "departures" endpoint
+# ── Wrap the whole "fetch and save" process in a function ─
+def fetch_departures():
+    """Pulls departures from NS API and saves the raw response."""
+    # ^ this text in triple quotes is a "docstring" — a description of what
+    # the function does. Doesn't affect how it runs, purely documentation.
 
-headers = {"Ocp-Apim-Subscription-Key": api_key}
-# ^ "headers" = extra info sent with the request, not the question itself — like showing an ID badge.
-# NS specifically requires the key under this exact name (from their docs).
+    # Why put this in a function at all?
+    # A function is a named, reusable block of code. Before, this logic ran
+    # once, top to bottom, then the script ended. Now we can CALL this
+    # function as many times as we want — which is exactly what we need
+    # for something that runs on a repeating schedule.
 
-params = {"station": "asd"}
-# ^ "params" = the actual question: "give me departures for station asd" (Amsterdam Centraal)
+    url = "https://gateway.apiportal.ns.nl/reisinformatie-api/api/v2/departures"
+    headers = {"Ocp-Apim-Subscription-Key": api_key}
+    params = {"station": "asd"}
+    # ^ same as before: the address, our "ID badge", and our actual question
 
-# ── Make the actual request ───────────────────────────────
-response = requests.get(url, headers=headers, params=params)
-# ^ sends the request to NS's server: GET = "I want to receive data"
-# NS replies, and that reply is stored in "response"
+    response = requests.get(url, headers=headers, params=params)
+    # ^ makes the actual request to NS's server
 
-print("Status code:", response.status_code)
-# ^ 200 = success | 401/403 = bad key | 404 = wrong URL/station | 429 = too many requests | 5xx = their server's problem
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Status code: {response.status_code}")
+    # ^ prints the current time (hour:minute:second) alongside the status code,
+    # so when you look back at the output, you know WHEN each pull happened.
+    # .strftime('%H:%M:%S') formats the current time as e.g. "16:45:02"
 
-# ── If it worked, save the raw data ───────────────────────
-if response.status_code == 200:
-    data = response.json()
-    # ^ converts the raw text response into a Python dictionary we can work with
+    if response.status_code == 200:
+        data = response.json()
+        # ^ convert the raw response into a Python dictionary
 
-    # Create the folder "data/raw" if it doesn't exist yet.
-    # exist_ok=True means: don't throw an error if the folder is already there.
-    os.makedirs("data/raw", exist_ok=True)
-    # Why "data/raw" specifically: real pipelines separate RAW (untouched) data
-    # from any cleaned/processed data, which will live in a different folder later.
+        os.makedirs("data/raw", exist_ok=True)
+        # ^ make sure the folder exists (no error if it already does)
 
-    # Build a unique filename using the current date and time.
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # ^ turns "right now" into a clean string like 20260906_161700
-    # (Year-Month-Day_Hour-Minute-Second — no spaces or slashes, safe for filenames)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"data/raw/departures_asd_{timestamp}.json"
+        # ^ build a unique filename using the current date+time,
+        # so each pull gets saved as its OWN file, nothing gets overwritten
 
-    filename = f"data/raw/departures_asd_{timestamp}.json"
-    # ^ e.g. "data/raw/departures_asd_20260906_161700.json"
-    # Why a timestamp: every time we run this script, it saves a NEW file
-    # instead of overwriting the last one — so we keep a full history of pulls.
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            # ^ write the data to that file, formatted to be human-readable
 
-    # Open a new file in write mode ("w") and save the data into it as JSON.
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-        # ^ json.dump() writes the Python dictionary "data" into the file "f",
-        # formatted as JSON text. indent=2 makes it readable if you open it yourself
-        # (adds line breaks and spacing instead of one giant unreadable line).
+        print(f"Saved to {filename}")
+    else:
+        print("Error:", response.text)
+        # ^ if something went wrong, print NS's error message instead of crashing
 
-    print(f"Saved raw data to {filename}")
-    # ^ confirms to us where the file landed
+# ── Scheduling ─────────────────────────────────────────────
+schedule.every(5).minutes.do(fetch_departures)
+# ^ this line REGISTERS a job with the schedule library:
+# "every 5 minutes, call the function fetch_departures"
+# Important: this line does NOT run the function itself — it just sets up
+# the rule. The actual running happens in the loop below.
 
-else:
-    # If the request failed, print NS's error message instead of crashing
-    print("Error:", response.text)
+print("Pipeline started. Fetching every 5 minutes. Press Ctrl+C to stop.")
+
+fetch_departures()
+# ^ we call it once manually, right now, immediately —
+# otherwise we'd have to wait a full 5 minutes before seeing ANY output,
+# which would make it seem like nothing is happening.
+
+while True:
+    # ^ "while True" means: repeat this block FOREVER, until something
+    # stops it manually (like you pressing Ctrl+C in the terminal).
+
+    schedule.run_pending()
+    # ^ this checks: "has 5 minutes passed since the job last ran?"
+    # If yes, it runs fetch_departures() again. If no, it does nothing this time.
+
+    time.sleep(30)
+    # ^ pause for 30 seconds before looping back and checking again.
+    # Why not check constantly with no pause? Because that would run this
+    # check thousands of times per second for no reason, wasting CPU.
+    # Checking every 30 seconds is more than often enough to catch
+    # a "5 minutes have passed" moment accurately.s
