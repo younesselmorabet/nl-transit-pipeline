@@ -1,0 +1,5 @@
+2026-09-13 18:35:53,388 [INFO] Found 2 new files to load.
+2026-09-13 18:35:53,420 [INFO] Prepared 80 rows total.
+2026-09-13 18:36:01,207 [INFO] Successfully loaded 80 rows into BigQuery.
+2026-09-13 18:36:01,209 [INFO] Moved 2 files to data/loaded/.
+2026-09-13 18:36:07,027 [INFO] No new files to load.
