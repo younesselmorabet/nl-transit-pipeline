@@ -1,0 +1,22 @@
+version: 2
+
+models:
+  - name: stg_departures
+    description: Cleaned staging model of raw NS departure data, with calculated delay in minutes.
+    columns:
+      - name: train_name
+        description: The train's identifier/number.
+        tests:
+          - not_null              # fails the test run if any row has a missing train_name
+
+      - name: planned_datetime
+        description: When the train was scheduled to depart.
+        tests:
+          - not_null
+
+      - name: cancelled
+        description: Whether the train was cancelled.
+        tests:
+          - not_null
+          # No accepted_values test needed — the column's BOOLEAN type already
+          # guarantees it can only ever be true, false, or null.

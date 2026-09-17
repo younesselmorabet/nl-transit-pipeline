@@ -1,0 +1,8 @@
+version: 2
+
+sources:
+  - name: raw_transit          # a label WE chose, used to reference this source in models
+    database: nl-transit-pipeline   # real GCP project ID
+    schema: nl_transit          # real BigQuery dataset name
+    tables:
+      - name: departures_raw    # real BigQuery table name
