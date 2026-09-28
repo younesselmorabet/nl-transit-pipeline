@@ -11,8 +11,9 @@ NS Transit API
       |
       v
 Ingest script (Python, Dockerized)   <- Extract
-  - runs every 5 minutes
+  - single pull per run (scheduled externally)
   - retries failed calls
+  - exit code 0/1 reports success/failure
   - logs to console + file
       |
       v
@@ -53,11 +54,11 @@ dbt: mart_delays_by_destination      <- Transform ("gold" layer)
 
 **Docker for the ingestion script, with a bind-mounted data folder.** The ingestion script is containerized so it runs identically on any machine, without depending on a local Python version or virtual environment. The API key is never baked into the image; it is passed at runtime with `--env-file`. A container's filesystem is isolated and disposable, so the local `data/` folder is mounted into the container (`-v`). Without the mount, raw files stay inside the container and are lost when it is removed, and the load script cannot see them. In a production setup, raw files would go to object storage (GCS or S3) instead of a shared volume; that was ruled out here to avoid needing a billing account.
 
-**A simple Python scheduler, not Airflow (yet).** Automation is currently handled with the `schedule` library, to prove the pipeline logic end-to-end before adding orchestration overhead. Migrating to Airflow — to properly sequence ingest → load → transform with dependency tracking — is the next planned step.
+**Single-pull ingestion, scheduler-agnostic.** `ingest.py` does one pull per run and exits with a status code (0 = success, 1 = failure) instead of looping internally. This makes it schedulable and retryable by an external orchestrator, which is the next planned step (Airflow). Until then, runs are triggered manually.
 
 **Idempotent loading.** The load script tracks which raw files have already been loaded by moving them to `data/loaded/` on success. Re-running the script can never duplicate data, and a failed load leaves files in place to retry safely.
 
-**Retry logic + structured logging.** The ingestion script retries failed API calls with backoff instead of silently failing, and logs to both console and file with timestamps and severity levels instead of using print statements.
+**Retry logic + structured logging.** The ingestion script retries failed API calls with backoff and reports failure through its exit code instead of failing silently, and logs to both console and file with timestamps and severity levels instead of using print statements.
 
 **Staging and marts, no intermediate/dimension layers.** The dbt project uses only `stg_` and `mart_` models. Intermediate (`int_`) models exist to share logic across multiple marts, and dimension (`dim_`) tables exist for separate reference entities (e.g. station metadata) — neither applies at this project's current scale, so they were deliberately left out rather than added for their own sake.
 
@@ -70,9 +71,10 @@ nl-transit-pipeline/
 ├── README.md
 ├── Dockerfile                    # Container image for the ingestion script
 ├── requirements.txt              # Python dependencies
-├── ingest.py                     # Extract: pulls from NS API, saves raw JSON
+├── ingest.py                     # Extract: one pull from NS API, saves raw JSON
 ├── load_to_bigquery.py           # Load: batch loads raw JSON into BigQuery
 ├── pipeline.log                  # generated log output (not committed)
+├── secrets/                      # service account key (not committed)
 ├── data/                         # not committed (gitignored)
 │   ├── raw/                      # files waiting to be loaded
 │   └── loaded/                   # files already loaded (idempotency record)
@@ -90,8 +92,8 @@ nl-transit-pipeline/
 
 - Single station (Amsterdam Centraal) — scope kept small and demonstrable; the pipeline logic generalizes to any station.
 - BigQuery Sandbox data expires after 60 days without a billing account.
-- No true real-time streaming — data is pulled every 5 minutes, not event-driven.
-- Orchestration is currently manual/scheduler-based, not yet Airflow-managed.
+- No true real-time streaming — data is pulled in discrete batches, not event-driven.
+- No scheduler yet: ingestion runs are triggered manually until Airflow is added.
 - Only the ingestion script is containerized. The load script and dbt still run locally because they rely on local Google Cloud credentials.
 - Raw data is shared between the ingestion container and the local machine through a bind mount, not through object storage.
 
@@ -120,7 +122,7 @@ nl-transit-pipeline/
    docker build -t nl-transit-ingest .
    docker run --env-file .env -v "${PWD}/data:/app/data" nl-transit-ingest
    ```
-   The `-v` flag mounts your local `data/` folder into the container, so raw files persist outside the container. The `${PWD}` syntax is for PowerShell.
+   Each run performs a single pull and exits. The `-v` flag mounts your local `data/` folder into the container, so raw files persist outside the container. The `${PWD}` syntax is for PowerShell.
 5. In a separate run, load data into BigQuery:
    ```
    python load_to_bigquery.py
@@ -138,7 +140,7 @@ Python, NS Transit API, Google BigQuery (Sandbox), dbt, Docker · Planned: Airfl
 
 ## Status
 
-- [x] Ingestion (scheduled, retries, structured logging)
+- [x] Ingestion (single-pull, retries, exit codes, structured logging)
 - [x] Raw storage
 - [x] Idempotent loading into BigQuery
 - [x] dbt staging model (tested)

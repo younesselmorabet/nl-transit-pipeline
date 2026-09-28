@@ -1,10 +1,10 @@
 # ── Import the tools we need ──────────────────────────────
 import os                        # environment variables, folder creation
+import sys                       # lets us exit with a status code (0 = success, 1 = failure)
 import json                      # convert Python data <-> JSON, write to files
-import time                      # pause the program between checks/retries
+import time                      # pause the program between retries
 import logging                   # professional-grade logging instead of print()
 import requests                  # call the NS API over the internet
-import schedule                  # lets us say "run this every N minutes" simply
 from datetime import datetime    # get current date/time, for timestamps
 from dotenv import load_dotenv   # read our .env file
 
@@ -28,13 +28,16 @@ logger = logging.getLogger(__name__)
 
 
 def fetch_departures(max_retries=3):
-    """Pulls departures from NS API, retrying on failure, and saves the raw response."""
+    """Pulls departures from NS API once, retrying on failure, and saves the raw response.
+
+    Returns True if a file was saved, False if every attempt failed.
+    """
     url = "https://gateway.apiportal.ns.nl/reisinformatie-api/api/v2/departures"
     headers = {"Ocp-Apim-Subscription-Key": api_key}
     params = {"station": "asd"}  # "asd" = Amsterdam Centraal's NS station code
 
     # ── Retry loop ───────────────────────────────────────────
-    # Try up to max_retries times before giving up entirely on this cycle.
+    # Try up to max_retries times before giving up entirely on this run.
     for attempt in range(1, max_retries + 1):
         try:
             response = requests.get(url, headers=headers, params=params, timeout=10)
@@ -49,7 +52,7 @@ def fetch_departures(max_retries=3):
                     json.dump(data, f, indent=2)
 
                 logger.info(f"Saved to {filename}")
-                return  # success — exit the function immediately, no need to retry
+                return True  # success — exit the function immediately, no need to retry
 
             else:
                 logger.warning(f"Attempt {attempt}: status {response.status_code} — {response.text}")
@@ -63,17 +66,21 @@ def fetch_departures(max_retries=3):
             logger.info(f"Retrying in {wait} seconds...")
             time.sleep(wait)
 
-    # If every attempt failed, log it clearly and move on — don't crash the whole pipeline.
-    logger.error("All retry attempts failed. Skipping this cycle.")
+    # If every attempt failed, log it and tell the caller it failed.
+    logger.error("All retry attempts failed.")
+    return False
 
 
-# ── Scheduling ─────────────────────────────────────────────
-schedule.every(5).minutes.do(fetch_departures)
-# Registers the job: "every 5 minutes, call fetch_departures" — doesn't run it yet.
+# ── Entry point ────────────────────────────────────────────
+# Runs only when the file is executed directly (python ingest.py),
+# not when it is imported by another file.
+# The script now does ONE pull and exits. The "every 5 minutes" part
+# is no longer this file's job — the scheduler (Airflow) owns it.
+if __name__ == "__main__":
+    logger.info("Ingestion run started.")
+    success = fetch_departures()
 
-logger.info("Pipeline started. Fetching every 5 minutes. Press Ctrl+C to stop.")
-fetch_departures()  # run once immediately so we're not waiting 5 minutes for first output
-
-while True:
-    schedule.run_pending()   # checks: "has 5 minutes passed? if so, run the job"
-    time.sleep(30)           # wait 30s before checking again, to avoid wasting CPU
+    # Exit code is how a program tells its caller whether it worked:
+    # 0 = success, anything else = failure. Airflow reads this to mark
+    # the task as success or failed, and to decide whether to retry.
+    sys.exit(0 if success else 1)

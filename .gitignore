@@ -8,3 +8,4 @@ transit_transform/logs/
 transit_transform/target/
 transit_transform/dbt_packages/
 data/
+secrets/
