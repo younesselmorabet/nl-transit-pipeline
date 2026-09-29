@@ -9,13 +9,11 @@ from datetime import datetime    # get current date/time, for timestamps
 from dotenv import load_dotenv   # read our .env file
 
 load_dotenv()
-api_key = os.getenv("NS_API_KEY")
-# Why: keeps the actual key out of the code itself — safe to push this file to GitHub.
+primary_key = os.getenv("NS_API_KEY")
+secondary_key = os.getenv("NS_API_KEY_SECONDARY")
+# Why: keeps the actual keys out of the code itself — safe to push this file to GitHub.
 
 # ── Logging setup ──────────────────────────────────────────
-# Writes to BOTH the console and a file (pipeline.log), with timestamps
-# and severity levels (INFO/WARNING/ERROR) — this is what a real system
-# uses so you can look back later at exactly what happened, and when.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -26,21 +24,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+URL = "https://gateway.apiportal.ns.nl/reisinformatie-api/api/v2/departures"
+PARAMS = {"station": "asd"}  # "asd" = Amsterdam Centraal's NS station code
 
-def fetch_departures(max_retries=3):
-    """Pulls departures from NS API once, retrying on failure, and saves the raw response.
 
-    Returns True if a file was saved, False if every attempt failed.
+def _try_key(api_key, key_label, max_retries=3):
+    """Attempts the pull with ONE specific key, retrying only on transient
+    failures (network errors, 5xx). A 401/403 means the key itself is bad,
+    so it returns immediately instead of wasting retries.
+
+    Returns "saved" if a file was written, "auth_failed" if the key was
+    rejected, or "exhausted" if retries ran out on a transient failure.
     """
-    url = "https://gateway.apiportal.ns.nl/reisinformatie-api/api/v2/departures"
     headers = {"Ocp-Apim-Subscription-Key": api_key}
-    params = {"station": "asd"}  # "asd" = Amsterdam Centraal's NS station code
 
-    # ── Retry loop ───────────────────────────────────────────
-    # Try up to max_retries times before giving up entirely on this run.
     for attempt in range(1, max_retries + 1):
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=10)
+            response = requests.get(URL, headers=headers, params=PARAMS, timeout=10)
 
             if response.status_code == 200:
                 data = response.json()
@@ -51,36 +51,63 @@ def fetch_departures(max_retries=3):
                 with open(filename, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2)
 
-                logger.info(f"Saved to {filename}")
-                return True  # success — exit the function immediately, no need to retry
+                logger.info(f"Saved to {filename} (using {key_label} key)")
+                return "saved"
+
+            elif response.status_code in (401, 403):
+                # The key itself is invalid/expired/revoked. Retrying with
+                # the SAME key can't fix that — stop immediately and let
+                # the caller decide whether to try a different key.
+                logger.warning(
+                    f"{key_label} key rejected (status {response.status_code}) — "
+                    f"not retrying this key."
+                )
+                return "auth_failed"
 
             else:
-                logger.warning(f"Attempt {attempt}: status {response.status_code} — {response.text}")
+                # Any other status (5xx, etc.) is treated as transient —
+                # worth retrying, since it's likely a problem on NS's side.
+                logger.warning(f"Attempt {attempt} ({key_label}): status {response.status_code} — {response.text}")
 
         except requests.exceptions.RequestException as e:
-            # Catches network-level failures: timeouts, connection drops, DNS issues, etc.
-            logger.warning(f"Attempt {attempt}: request failed — {e}")
+            # Network-level failures: timeouts, connection drops, DNS issues.
+            # Also transient — worth retrying.
+            logger.warning(f"Attempt {attempt} ({key_label}): request failed — {e}")
 
         if attempt < max_retries:
             wait = attempt * 5  # backoff: wait longer each retry (5s, then 10s)
             logger.info(f"Retrying in {wait} seconds...")
             time.sleep(wait)
 
-    # If every attempt failed, log it and tell the caller it failed.
+    logger.error(f"All retry attempts exhausted on {key_label} key (transient failures).")
+    return "exhausted"
+
+
+def fetch_departures(max_retries=3):
+    """Pulls departures from NS API once, using the primary key first.
+    Falls back to the secondary key ONLY if the primary key itself is
+    rejected (401/403) — never as a first choice, and never for
+    transient failures.
+
+    Returns True if a file was saved, False if every option failed.
+    """
+    result = _try_key(primary_key, "primary", max_retries=max_retries)
+
+    if result == "saved":
+        return True
+
+    if result == "auth_failed" and secondary_key:
+        logger.info("Falling back to secondary key.")
+        result = _try_key(secondary_key, "secondary", max_retries=max_retries)
+        if result == "saved":
+            return True
+
     logger.error("All retry attempts failed.")
     return False
 
 
 # ── Entry point ────────────────────────────────────────────
-# Runs only when the file is executed directly (python ingest.py),
-# not when it is imported by another file.
-# The script now does ONE pull and exits. The "every 5 minutes" part
-# is no longer this file's job — the scheduler (Airflow) owns it.
 if __name__ == "__main__":
     logger.info("Ingestion run started.")
     success = fetch_departures()
-
-    # Exit code is how a program tells its caller whether it worked:
-    # 0 = success, anything else = failure. Airflow reads this to mark
-    # the task as success or failed, and to decide whether to retry.
     sys.exit(0 if success else 1)
