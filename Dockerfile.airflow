@@ -1,0 +1,15 @@
+FROM apache/airflow:3.3.1
+
+COPY requirements-airflow.txt /requirements-airflow.txt
+
+# Step 1: install everything EXCEPT dbt-bigquery, under Airflow's constraints.
+# This keeps Airflow itself stable.
+RUN pip install --no-cache-dir \
+    --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-3.3.1/constraints-3.11.txt" \
+    requests python-dotenv "google-cloud-bigquery==3.43.0"
+
+# Step 2: install dbt-bigquery WITHOUT the constraints file, so pip can pick
+# whatever google-cloud-storage version dbt actually needs, instead of being
+# forced into the version Airflow's own (unused, for this project) Google
+# provider wants.
+RUN pip install --no-cache-dir "dbt-bigquery==1.12.0"

@@ -1,0 +1,13 @@
+transit_transform:
+  outputs:
+    dev:
+      dataset: nl_transit_dbt
+      job_execution_timeout_seconds: 300
+      job_retries: 1
+      location: EU
+      method: oauth
+      priority: interactive
+      project: nl-transit-pipeline
+      threads: 4
+      type: bigquery
+  target: dev

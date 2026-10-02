@@ -9,9 +9,13 @@ from datetime import datetime    # get current date/time, for timestamps
 from dotenv import load_dotenv   # read our .env file
 
 load_dotenv()
-primary_key = os.getenv("NS_API_KEY")
-secondary_key = os.getenv("NS_API_KEY_SECONDARY")
+DEFAULT_PRIMARY_KEY = os.getenv("NS_API_KEY")
+DEFAULT_SECONDARY_KEY = os.getenv("NS_API_KEY_SECONDARY")
 # Why: keeps the actual keys out of the code itself — safe to push this file to GitHub.
+# These are only DEFAULTS now — fetch_departures() below accepts keys as
+# arguments, so a caller (like the Airflow DAG) can pass in keys from
+# somewhere else (an Airflow Variable) instead of relying on a .env file
+# that doesn't exist inside the Airflow containers.
 
 # ── Logging setup ──────────────────────────────────────────
 logging.basicConfig(
@@ -83,14 +87,22 @@ def _try_key(api_key, key_label, max_retries=3):
     return "exhausted"
 
 
-def fetch_departures(max_retries=3):
+def fetch_departures(max_retries=3, primary_key=None, secondary_key=None):
     """Pulls departures from NS API once, using the primary key first.
     Falls back to the secondary key ONLY if the primary key itself is
     rejected (401/403) — never as a first choice, and never for
     transient failures.
 
+    primary_key / secondary_key: pass these explicitly to use specific
+    keys (e.g. from an Airflow Variable). If left as None, falls back to
+    whatever was loaded from .env at import time — this is what keeps
+    `python ingest.py` working standalone with no changes needed.
+
     Returns True if a file was saved, False if every option failed.
     """
+    primary_key = primary_key if primary_key is not None else DEFAULT_PRIMARY_KEY
+    secondary_key = secondary_key if secondary_key is not None else DEFAULT_SECONDARY_KEY
+
     result = _try_key(primary_key, "primary", max_retries=max_retries)
 
     if result == "saved":

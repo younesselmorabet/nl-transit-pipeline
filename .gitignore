@@ -9,3 +9,5 @@ transit_transform/target/
 transit_transform/dbt_packages/
 data/
 secrets/
+.env.airflow
+config/
