@@ -1,0 +1,46 @@
+name: CI
+
+# Runs on every push and every pull request targeting main.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Job 1: lint ──────────────────────────────────────────
+  # Catches syntax errors / undefined names in the Python scripts.
+  # Fast, no credentials needed.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install flake8
+        run: pip install flake8
+
+      - name: Lint ingest.py and load_to_bigquery.py
+        run: flake8 ingest.py load_to_bigquery.py --select=E9,F --show-source
+
+  # ── Job 2: docker-build ──────────────────────────────────
+  # Confirms both images still build cleanly. This is the check that
+  # would catch a dependency conflict (like the dbt-bigquery /
+  # google-cloud-storage one) the moment it reappears, rather than
+  # someone discovering it the next time they personally rebuild.
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Build the ingestion image
+        run: docker build -t nl-transit-ingest .
+
+      - name: Build the Airflow image
+        run: docker build -f Dockerfile.airflow -t nl-transit-airflow .
