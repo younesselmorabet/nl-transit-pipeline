@@ -1,6 +1,8 @@
 # NL Transit Data Pipeline
 
-An end-to-end data pipeline that ingests live Dutch train departure data from the NS (Nederlandse Spoorwegen) API, stores it, loads it into a cloud warehouse, transforms it into clean, tested, business-ready tables using dbt, and orchestrates the whole thing on a schedule with Apache Airflow. Built as a data engineering portfolio project targeting roles in the Netherlands and Ireland.
+An end-to-end data pipeline that ingests live Dutch train departure data from the NS (Nederlandse Spoorwegen) API, stores it, loads it into a cloud warehouse, transforms it into clean, tested, business-ready tables using dbt, orchestrates the whole thing on a schedule with Apache Airflow, and surfaces it in a live dashboard. Built as a data engineering portfolio project targeting roles in the Netherlands and Ireland.
+
+**Live dashboard:** https://datastudio.google.com/reporting/6d810d36-4602-41db-bb9c-c8d05661afe0
 
 ## Architecture
 
@@ -44,7 +46,10 @@ dbt: mart_delays_by_destination      <- Transform ("gold" layer)
   - one row per destination
       |
       v
-  [Dashboard - planned]
+Looker Studio dashboard
+  - avg delay by destination (bar chart)
+  - full breakdown table, sorted by cancellation rate
+  - headline scorecards (total departures, overall avg delay)
 ```
 
 ## Why these choices
@@ -73,6 +78,10 @@ dbt: mart_delays_by_destination      <- Transform ("gold" layer)
 
 **Staging and marts, no intermediate/dimension layers.** The dbt project uses only `stg_` and `mart_` models. Intermediate (`int_`) models exist to share logic across multiple marts, and dimension (`dim_`) tables exist for separate reference entities (e.g. station metadata) — neither applies at this project's current scale, so they were deliberately left out rather than added for their own sake.
 
+**GitHub Actions CI on every push.** Two jobs run automatically: a lint check on the Python scripts, and a full rebuild of both Docker images (`Dockerfile`, `Dockerfile.airflow`). The Docker build check specifically exists to catch the `dbt-bigquery`/constraints-file conflict (above) the moment it ever reappears — e.g. if a future `dbt-bigquery` release needs a dependency version Airflow's constraints no longer allow — rather than someone discovering it the next time they personally rebuild. No deployment step: the pipeline runs on a local Docker Compose stack, so this is CI without CD, a deliberate scope decision rather than an oversight.
+
+**Looker Studio dashboard on top of the gold layer.** Connected directly to `mart_delays_by_destination` in BigQuery. Surfaces average delay by destination (bar chart), overall headline numbers (total departures, overall average delay), and a full sortable table ordered by cancellation rate, so the worst-performing routes surface first.
+
 ## Project structure
 
 ```
@@ -81,6 +90,9 @@ nl-transit-pipeline/
 ├── .env.airflow                  # AIRFLOW_UID, FERNET_KEY (not committed)
 ├── .gitignore
 ├── README.md
+├── .github/
+│   └── workflows/
+│       └── ci.yml                # GitHub Actions: lint + Docker build checks
 ├── Dockerfile                    # Ingestion script image
 ├── Dockerfile.airflow            # Custom Airflow image (dbt + BigQuery libraries)
 ├── docker-compose.yaml           # Full Airflow stack (7 services)
@@ -116,6 +128,7 @@ nl-transit-pipeline/
 - `departures_raw` only ever appends (`WRITE_APPEND`) — no deduplication or retention policy. Fine at this data volume; a real production version would need one.
 - **dbt shares the Airflow worker's image rather than running in an isolated container.** A standalone, fully isolated dbt image (separate Dockerfile, no shared dependencies with Airflow at all) was built and tested successfully outside the DAG. Wiring it in as an actual task would need either mounting the Docker socket into the worker (`DockerOperator`) — which grants that container broad control over the whole Docker host, a real security trade-off, not just a config change — or a Kubernetes-based setup (`KubernetesPodOperator`), which is the production-grade answer but a substantial addition of new infrastructure. Both were deliberately deferred in favor of the current approach: install Airflow-safe packages under its constraints file, and `dbt-bigquery` separately outside it (see "Why these choices" above). This keeps a known, narrow risk — a future image rebuild could reintroduce a dependency conflict — rather than a broader one.
 - Secrets (API keys, the GCP service account key) are stored as Airflow Variables and a gitignored file, not a dedicated secrets manager (Google Secret Manager, Vault). Reasonable for a solo local project; a team setting would want per-secret access control and audit logging, which Airflow Variables don't provide on their own.
+- CI verifies the code builds and lints correctly; it does not deploy or test against a live Airflow instance. The pipeline must still be run and verified locally.
 
 ## Setup
 
@@ -152,10 +165,11 @@ nl-transit-pipeline/
      ```
    - In the Airflow UI (`localhost:8080`, default login `airflow`/`airflow`), add `ns_api_key` and `ns_api_key_secondary` under Admin → Variables.
    - Unpause both DAGs. `nl_transit_ingest` runs every 5 minutes; `nl_transit_transform` runs hourly.
+6. CI runs automatically on every push to `main` via GitHub Actions (`.github/workflows/ci.yml`) — no setup needed on your end to view results, just check the Actions tab.
 
 ## Tech stack
 
-Python, NS Transit API, Google BigQuery (Sandbox), dbt, Docker, Docker Compose, Apache Airflow (CeleryExecutor) · Planned: GitHub Actions, dashboard (Looker Studio)
+Python, NS Transit API, Google BigQuery (Sandbox), dbt, Docker, Docker Compose, Apache Airflow (CeleryExecutor), GitHub Actions, Looker Studio
 
 ## Status
 
@@ -166,5 +180,5 @@ Python, NS Transit API, Google BigQuery (Sandbox), dbt, Docker, Docker Compose, 
 - [x] dbt marts model
 - [x] Docker (ingestion script)
 - [x] Airflow orchestration (Docker Compose, custom image, two DAGs: ingest + transform)
-- [ ] CI/CD (GitHub Actions)
-- [ ] Dashboard
+- [x] CI/CD (GitHub Actions — lint + Docker build checks)
+- [x] Dashboard (Looker Studio) — [live link](https://datastudio.google.com/reporting/6d810d36-4602-41db-bb9c-c8d05661afe0)
