@@ -76,7 +76,7 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/ingest.py:/opt/airflow/ingest.py          
     - ${AIRFLOW_PROJ_DIR:-.}/load_to_bigquery.py:/opt/airflow/load_to_bigquery.py  
     - ${AIRFLOW_PROJ_DIR:-.}/transit_transform:/opt/airflow/transit_transform  
-    - ${AIRFLOW_PROJ_DIR:-.}/dbt_profiles/profiles.yml:/home/airflow/.dbt/profiles.yml     
+    - ${AIRFLOW_PROJ_DIR:-.}/dbt_profiles/profiles.yml:/home/airflow/.dbt/profiles.yml:ro
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
