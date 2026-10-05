@@ -25,7 +25,7 @@ def run_ingest():
     success = fetch_departures(primary_key=primary_key, secondary_key=secondary_key)
 
     if not success:
-        raise RuntimeError("Ingestion failed: both primary and secondary keys exhausted.")
+        raise RuntimeError("Ingestion failed: see task logs above for the specific cause (transient failure or both keys rejected).")
 
 
 default_args = {
