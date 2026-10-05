@@ -26,10 +26,12 @@ clean-targets:         # directories to be removed by `dbt clean`
 # Configuring models
 # Full documentation: https://docs.getdbt.com/docs/configuring-models
 
-# In this example config, we tell dbt to build all models in the example/
-# directory as views. These settings can be overridden in the individual model
-# files using the `{{ config(...) }}` macro.
+# This project has no example/ subfolder — this config applies to every
+# model in the transit_transform package (stg_departures and
+# mart_delays_by_destination). All models are materialized as views by
+# default; override per-model with the `{{ config(...) }}` macro if a
+# specific model should be a table instead.
 models:
   transit_transform:
-    # Config indicated by + and applies to all files under models/example/
+    # Config indicated by + and applies to every model in this package.
       +materialized: view

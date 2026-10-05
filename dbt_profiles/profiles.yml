@@ -5,7 +5,8 @@ transit_transform:
       job_execution_timeout_seconds: 300
       job_retries: 1
       location: EU
-      method: oauth
+      method: service-account
+      keyfile: /opt/airflow/secrets/gcp-key.json
       priority: interactive
       project: nl-transit-pipeline
       threads: 4

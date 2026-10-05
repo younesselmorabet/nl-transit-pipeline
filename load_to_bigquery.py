@@ -104,3 +104,4 @@ try:
 
 except Exception as e:
     logger.error(f"Load failed, files left in place for retry: {e}")
+    sys.exit(1)
