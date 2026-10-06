@@ -34,7 +34,7 @@ with DAG(
 
     load = BashOperator(
         task_id="load",
-        bash_command="python /opt/airflow/load_to_bigquery.py",
+        bash_command="cd /opt/airflow && python load_to_bigquery.py",
     )
 
     dbt_run = BashOperator(
