@@ -27,12 +27,19 @@ DAG 2: nl_transit_transform (hourly)
       |
       v
 Load script (Python)                 <- Load
-  - batch loads into BigQuery
+  - deduplicates within the batch
+    (same train polled repeatedly
+    before departure)
+  - loads batch into a staging table
+  - rebuilds departures_raw from
+    (existing + staging), keeping
+    the latest actual_datetime per
+    train (ROW_NUMBER)
   - idempotent: moves processed
     files so nothing loads twice
       |
       v
-BigQuery: departures_raw             <- "bronze" layer, untouched raw data
+BigQuery: departures_raw             <- "bronze" layer, deduplicated raw data
       |
       v
 dbt: stg_departures                  <- Transform ("silver" layer)
@@ -60,6 +67,8 @@ Looker Studio dashboard
 
 **Batch loading, not streaming inserts.** BigQuery Sandbox blocks streaming inserts. Batch loading is used instead, which also happens to be the more appropriate pattern for a pipeline that runs on a fixed schedule rather than reacting to real-time events.
 
+**Table rebuild instead of `MERGE`, for deduplication.** The NS API returns a train in its departures list repeatedly in the minutes before it actually departs, so with a 5-minute polling cadence the same train could be captured 10-20+ times before leaving — each poll landing as a separate row once accumulated batches were loaded. The natural fix is an upsert (`MERGE ... WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT`, keyed on `train_name` + `planned_datetime` + `direction`), but **BigQuery Sandbox blocks all DML** (`MERGE`/`UPDATE`/`DELETE`) — only load jobs and `CREATE TABLE ... AS SELECT` are allowed on the free tier. The workaround: each run (1) deduplicates the incoming batch itself in Python (a single `MERGE` can't match more than one source row per target row, so this step is required regardless of the BigQuery-side fix), then (2) rebuilds `departures_raw` entirely via `CREATE OR REPLACE TABLE AS SELECT`, combining the existing table with the new batch and keeping only the most recent `actual_datetime` per train (`ROW_NUMBER() OVER (PARTITION BY ... ORDER BY actual_datetime DESC)`). This was caught after the fact: an existing `avg_delay_minutes` of 198 minutes on one destination in the dashboard turned out to be one real train (a ~7-hour-delayed overnight sleeper service), averaged across 64 duplicate rows of itself. A one-off cleanup query reran the same dedup logic directly against `departures_raw` to remove the ~9,600 duplicate rows that had already accumulated. The trade-off: every run now rescans the full table rather than touching only new rows, acceptable at this data volume (under a thousand rows) but not how this would be built against a paid BigQuery project with `MERGE` available.
+
 **Two DAGs on two schedules, not one.** The pipeline started as a single DAG running all four steps every 5 minutes. That meant dbt rebuilt its models and re-ran all tests every 5 minutes too, which burns BigQuery Sandbox's usage quota for no real benefit — nothing consumes the mart table that often. It was split into `nl_transit_ingest` (every 5 minutes, keeps raw data fresh) and `nl_transit_transform` (hourly: load → dbt run → dbt test), each scheduled independently.
 
 **Airflow orchestration via Docker Compose, with a custom image.** Airflow runs locally as a 7-container stack (API server, scheduler, worker, dag-processor, triggerer, Postgres metadata DB, Redis broker) via the official Celery-based `docker-compose.yaml`. Since dbt and the BigQuery client aren't in Airflow's base image, a custom image (`Dockerfile.airflow`) extends it. Installing `dbt-bigquery` hit a real dependency conflict: it requires `google-cloud-storage<3.2`, while Airflow's own constraints file (used to keep Airflow's core dependencies stable) pins `google-cloud-storage==3.13.1` for a Google provider package this project doesn't use. The fix: a two-step install — Airflow-related packages installed under the constraints file, `dbt-bigquery` installed separately, outside it, so pip can resolve its own dependency tree without a forced, contradictory pin.
@@ -72,7 +81,7 @@ Looker Studio dashboard
 
 **Single-pull ingestion, scheduler-agnostic.** `ingest.py`'s `fetch_departures()` does one pull per run and exits with a status code (0 = success, 1 = failure) instead of looping internally — Airflow's scheduler owns the "every 5 minutes" part. The function also accepts the API keys as optional arguments (falling back to `.env` when run standalone), so the exact same function is called both by `python ingest.py` and by the Airflow DAG, with no duplicated logic.
 
-**Idempotent loading.** The load script tracks which raw files have already been loaded by moving them to `data/loaded/` on success. Re-running the script can never duplicate data, and a failed load leaves files in place to retry safely.
+**Idempotent loading.** The load script tracks which raw files have already been loaded by moving them to `data/loaded/` on success, and only does so after the `departures_raw` rebuild (above) confirms successfully — a failed run leaves files in place to retry safely, nothing is silently lost.
 
 **Retry logic distinguishes transient from permanent failures.** A `401`/`403` means the API key itself is rejected — retrying with the same key can't fix that, so the script stops immediately and falls back to a secondary key instead. A `5xx` or network error is treated as transient and retried with backoff. Task-level retries (2, via Airflow's `default_args`) sit on top of this as a second safety net.
 
@@ -97,9 +106,10 @@ nl-transit-pipeline/
 ├── Dockerfile.airflow            # Custom Airflow image (dbt + BigQuery libraries)
 ├── docker-compose.yaml           # Full Airflow stack (7 services)
 ├── requirements.txt              # Ingestion script's dependencies
-├── requirements-airflow.txt      # Extra packages installed into the Airflow image
+├── requirements-airflow-core.txt # Airflow-image packages installed under Airflow's constraints file
+├── requirements-airflow-dbt.txt  # dbt-bigquery, installed separately, outside the constraints file
 ├── ingest.py                     # Extract: one pull from NS API, saves raw JSON
-├── load_to_bigquery.py           # Load: batch loads raw JSON into BigQuery
+├── load_to_bigquery.py           # Load: batch loads into staging, rebuilds departures_raw with dedup
 ├── pipeline.log                  # generated log output (not committed)
 ├── secrets/                      # GCP service account key, read-only mount (not committed)
 ├── dbt_profiles/
@@ -125,7 +135,7 @@ nl-transit-pipeline/
 - Single station (Amsterdam Centraal) — scope kept small and demonstrable; the pipeline logic generalizes to any station.
 - BigQuery Sandbox data expires after 60 days without a billing account.
 - No true real-time streaming — data is pulled in discrete batches, not event-driven.
-- `departures_raw` only ever appends (`WRITE_APPEND`) — no deduplication or retention policy. Fine at this data volume; a real production version would need one.
+- `departures_raw` is deduplicated on every run (see "Table rebuild instead of `MERGE`" above) but still has no retention policy — the table grows unbounded and every run rescans it in full. Fine at this data volume; a production version at scale would need date-based pruning and a true `MERGE` (which requires moving off BigQuery Sandbox's free tier).
 - **dbt shares the Airflow worker's image rather than running in an isolated container.** A standalone, fully isolated dbt image (separate Dockerfile, no shared dependencies with Airflow at all) was built and tested successfully outside the DAG. Wiring it in as an actual task would need either mounting the Docker socket into the worker (`DockerOperator`) — which grants that container broad control over the whole Docker host, a real security trade-off, not just a config change — or a Kubernetes-based setup (`KubernetesPodOperator`), which is the production-grade answer but a substantial addition of new infrastructure. Both were deliberately deferred in favor of the current approach: install Airflow-safe packages under its constraints file, and `dbt-bigquery` separately outside it (see "Why these choices" above). This keeps a known, narrow risk — a future image rebuild could reintroduce a dependency conflict — rather than a broader one.
 - Secrets (API keys, the GCP service account key) are stored as Airflow Variables and a gitignored file, not a dedicated secrets manager (Google Secret Manager, Vault). Reasonable for a solo local project; a team setting would want per-secret access control and audit logging, which Airflow Variables don't provide on their own.
 - CI verifies the code builds and lints correctly; it does not deploy or test against a live Airflow instance. The pipeline must still be run and verified locally.
@@ -175,7 +185,7 @@ Python, NS Transit API, Google BigQuery (Sandbox), dbt, Docker, Docker Compose, 
 
 - [x] Ingestion (single-pull, retries, secondary-key fallback, exit codes, structured logging)
 - [x] Raw storage
-- [x] Idempotent loading into BigQuery
+- [x] Idempotent, deduplicated loading into BigQuery (batch-level + full-table rebuild, working around BigQuery Sandbox's DML restriction)
 - [x] dbt staging model (tested)
 - [x] dbt marts model
 - [x] Docker (ingestion script)
