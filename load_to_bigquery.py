@@ -2,7 +2,7 @@ import os
 import json
 import sys
 import glob
-import shutil                    # lets us MOVE files, not just read them
+import shutil
 import logging
 from google.cloud import bigquery
 from datetime import datetime
@@ -17,9 +17,11 @@ logger = logging.getLogger(__name__)
 PROJECT_ID = "nl-transit-pipeline"
 DATASET_ID = "nl_transit"
 TABLE_ID = "departures_raw"
+STAGING_TABLE_ID = "departures_staging"  # temporary holding table for this run's batch
 
 client = bigquery.Client(project=PROJECT_ID)
 table_ref = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
+staging_ref = f"{PROJECT_ID}.{DATASET_ID}.{STAGING_TABLE_ID}"
 
 
 def convert_timestamp(ts):
@@ -31,8 +33,6 @@ def convert_timestamp(ts):
 
 
 # ── Idempotency: only process files still sitting in data/raw/ ─────
-# Once a file is loaded successfully, it gets MOVED to data/loaded/.
-# So re-running this script can never load the same file twice.
 os.makedirs("data/loaded", exist_ok=True)
 files = glob.glob("data/raw/departures_asd_*.json")
 
@@ -64,10 +64,24 @@ for filepath in files:
             "category": d.get("trainCategory"),
             "departure_status": d.get("departureStatus"),
         })
-        # .get() instead of direct access — returns None instead of crashing
-        # if a field happens to be missing from a given record.
 
 logger.info(f"Prepared {len(rows_to_insert)} rows total.")
+
+# ── Deduplicate within this batch before it ever reaches BigQuery ──
+# Same train can be polled several times in one batch (e.g. ingest ran
+# every 5 min while this hourly job was backlogged). Keep only the most
+# recent actual_datetime per (train_name, planned_datetime, direction).
+deduped = {}
+for row in rows_to_insert:
+    key = (row["train_name"], row["planned_datetime"], row["direction"])
+    existing = deduped.get(key)
+    if existing is None or (row["actual_datetime"] or "") > (existing["actual_datetime"] or ""):
+        deduped[key] = row
+
+dropped = len(rows_to_insert) - len(deduped)
+if dropped:
+    logger.info(f"Deduplicated batch: dropped {dropped} stale duplicate poll(s), kept {len(deduped)} rows.")
+rows_to_insert = list(deduped.values())
 
 # ── Table schema: explicit types, not auto-inferred ─────────────────
 schema = [
@@ -84,21 +98,56 @@ schema = [
 ]
 
 table = bigquery.Table(table_ref, schema=schema)
-table = client.create_table(table, exists_ok=True)  # exists_ok = don't error if already there
+table = client.create_table(table, exists_ok=True)
 
-# ── Batch load (not streaming — required for BigQuery Sandbox) ─────
+# staging table gets the same schema, created once if missing
+staging_table = bigquery.Table(staging_ref, schema=schema)
+staging_table = client.create_table(staging_table, exists_ok=True)
+
+# ── Load this batch into staging (overwrite, not append) ──
 job_config = bigquery.LoadJobConfig(
     schema=schema,
-    write_disposition="WRITE_APPEND",  # add to existing data, don't overwrite
+    write_disposition="WRITE_TRUNCATE",  # staging only ever holds THIS run's batch
 )
 
 try:
-    load_job = client.load_table_from_json(rows_to_insert, table_ref, job_config=job_config)
-    load_job.result()  # wait until the batch job actually finishes
-    logger.info(f"Successfully loaded {len(rows_to_insert)} rows into BigQuery.")
+    load_job = client.load_table_from_json(rows_to_insert, staging_ref, job_config=job_config)
+    load_job.result()
+    logger.info(f"Loaded {len(rows_to_insert)} deduplicated rows into staging.")
 
-    # Only move files AFTER a confirmed successful load — if the load fails,
-    # files stay in data/raw/ so nothing is silently lost, and the next run retries them.
+    # ── Rebuild departures_raw with deduplication ──
+    # BigQuery Sandbox (free tier) blocks DML (MERGE/UPDATE/DELETE).
+    # Workaround: rebuild the table entirely each run, combining existing
+    # rows + this batch, deduplicated. CREATE OR REPLACE TABLE AS SELECT is
+    # a query job, not DML, so it's allowed on the free tier.
+    rebuild_sql = f"""
+        CREATE OR REPLACE TABLE `{table_ref}` AS
+        SELECT * EXCEPT(rn)
+        FROM (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY train_name, planned_datetime, direction
+                    ORDER BY actual_datetime DESC
+                ) AS rn
+            FROM (
+                SELECT * FROM `{table_ref}`
+                UNION ALL
+                SELECT * FROM `{staging_ref}`
+            )
+        )
+        WHERE rn = 1
+    """
+    rebuild_job = client.query(rebuild_sql)
+    rebuild_job.result()
+
+    # CREATE OR REPLACE TABLE AS SELECT doesn't return a reliable row count
+    # via the job result, so count explicitly after the rebuild completes.
+    count_job = client.query(f"SELECT COUNT(*) AS n FROM `{table_ref}`")
+    row_count = list(count_job.result())[0]["n"]
+    logger.info(f"Rebuilt {TABLE_ID} with deduplication: {row_count} rows total.")
+
+    # Only move files AFTER a confirmed successful rebuild
     for filepath in files:
         shutil.move(filepath, os.path.join("data/loaded", os.path.basename(filepath)))
     logger.info(f"Moved {len(files)} files to data/loaded/.")
